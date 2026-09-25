@@ -36,6 +36,8 @@ use matrix_sdk_base::RequestedRequiredStates;
 #[cfg(feature = "e2e-encryption")]
 use matrix_sdk_common::executor::JoinHandleExt as _;
 use matrix_sdk_common::{executor::spawn, timer};
+#[cfg(feature = "e2e-encryption")]
+use ruma::api::error::{ErrorBody, StandardErrorBody};
 use ruma::{
     OwnedRoomId, RoomId,
     api::{client::sync::sync_events::v5 as http, error::ErrorKind},
@@ -797,6 +799,24 @@ impl SlidingSync {
                                 if error.client_api_error_kind() == Some(&ErrorKind::UnknownPos) {
                                     // The Sliding Sync session has expired. Let's reset `pos`.
                                     self.expire_session().await;
+                                }
+
+                                #[cfg(feature = "e2e-encryption")]
+                                if let Some(ruma::api::error::Error{status_code: ::http::StatusCode::BAD_REQUEST, body: ErrorBody::Standard(StandardErrorBody {kind: ErrorKind::InvalidParam, message, ..}), ..}) = error.as_client_api_error()
+                                    && message.contains("to_device")
+                                    && message.contains("should look like an int")
+                                    && let Some(olm_machine) = &*self.inner.client.olm_machine().await {
+                                    // Synapse uses different `to_device` tokens for Sliding Sync
+                                    // and sync v3. This error is returned if the sync v3 token is
+                                    // used with the Sliding Sync API. Just delete the token since
+                                    // that error should only happen once when upgrading to Sliding
+                                    // Sync.
+
+
+                                    if let Ok(()) = olm_machine.store().delete_next_batch_token().await {
+                                        warn!("Outdated to_device token loaded from cache. Retrying without token.");
+                                        continue;
+                                    }
                                 }
 
                                 yield Err(error);
